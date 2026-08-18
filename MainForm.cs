@@ -12,14 +12,19 @@ public sealed class MainForm : Form
     private readonly ComboBox _intervalBox = new();
     private readonly CheckBox _darkModeBox = new();
     private readonly Label _freeSpaceLabel = new();
-    private readonly TextBox _urlBox = new();
-    private readonly DataGridView _grid = new();
+    private readonly TabControl _tabs = new();
+    private readonly TextBox _cimeUrlBox = new();
+    private readonly TextBox _vodUrlBox = new();
+    private readonly DataGridView _cimeGrid = new();
+    private readonly DataGridView _vodGrid = new();
+    private readonly Button _vodDownloadButton = new();
     private readonly TextBox _logBox = new();
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
     private readonly System.Windows.Forms.Timer _durationTimer = new();
     private readonly Dictionary<string, DateTime> _recordingStarts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _recordingPaths = new(StringComparer.OrdinalIgnoreCase);
+    private CancellationTokenSource? _vodDownloadCts;
     private bool _suppressConfigSave;
 
     private readonly Dictionary<string, int> _intervals = new()
@@ -71,10 +76,9 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Padding = new Padding(14)
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -122,25 +126,6 @@ public sealed class MainForm : Form
         _freeSpaceLabel.Dock = DockStyle.Fill;
         settings.Controls.Add(_freeSpaceLabel, 10, 0);
 
-        var channelBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1 };
-        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 14));
-        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
-        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
-        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
-        root.Controls.Add(channelBar, 0, 1);
-
-        _urlBox.Dock = DockStyle.Fill;
-        _urlBox.PlaceholderText = "https://ci.me/@name/live";
-        channelBar.Controls.Add(_urlBox, 0, 0);
-
-        var addButton = new Button { Text = "\uCD94\uAC00", Dock = DockStyle.Fill };
-        addButton.Click += (_, _) => AddChannel();
-        channelBar.Controls.Add(addButton, 2, 0);
-        var removeButton = new Button { Text = "\uC0AD\uC81C", Dock = DockStyle.Fill };
-        removeButton.Click += (_, _) => RemoveSelected();
-        channelBar.Controls.Add(removeButton, 4, 0);
-
         var actionBar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -162,36 +147,133 @@ public sealed class MainForm : Form
         actionBar.Controls.Add(_startButton, 0, 0);
         actionBar.Controls.Add(_stopButton, 1, 0);
         actionBar.Controls.Add(new Label { Text = "\uC0C1\uD0DC\uC640 \uC6A9\uB7C9\uC740 \uB179\uD654 \uC911 1\uCD08\uB9C8\uB2E4 \uAC31\uC2E0\uB429\uB2C8\uB2E4.", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Segoe UI", 9F) }, 2, 0);
-        root.Controls.Add(actionBar, 0, 2);
+        root.Controls.Add(actionBar, 0, 1);
 
-        _grid.Dock = DockStyle.Fill;
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
-        _grid.AllowUserToResizeRows = false;
-        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.MultiSelect = false;
-        _grid.RowHeadersVisible = false;
-        _grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Enabled", HeaderText = "\uC0AC\uC6A9", FillWeight = 38 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "\uC774\uB984", FillWeight = 74 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Url", HeaderText = "URL", FillWeight = 190 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "RecordingState", HeaderText = "\uB179\uD654\uC0C1\uD0DC", FillWeight = 68, ReadOnly = true });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Duration", HeaderText = "\uB179\uD654\uC2DC\uAC04", FillWeight = 64, ReadOnly = true });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Size", HeaderText = "\uC6A9\uB7C9", FillWeight = 58, ReadOnly = true });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FinalizeProgress", HeaderText = "\uBCC0\uD658", FillWeight = 48, ReadOnly = true });
-        _grid.CellEndEdit += (_, _) => SaveGridToConfig();
-        _grid.CurrentCellDirtyStateChanged += (_, _) =>
-        {
-            if (_grid.IsCurrentCellDirty) _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        };
-        _grid.CellValueChanged += (_, _) => SaveGridToConfig();
-        root.Controls.Add(_grid, 0, 3);
+        _tabs.Dock = DockStyle.Fill;
+        _tabs.TabPages.Add(CreatePlatformTab("ci.me", _cimeUrlBox, _cimeGrid, "https://ci.me/@name/live"));
+        _tabs.TabPages.Add(CreateVodTab());
+        root.Controls.Add(_tabs, 0, 2);
 
         _logBox.Dock = DockStyle.Fill;
         _logBox.Multiline = true;
         _logBox.ScrollBars = ScrollBars.Vertical;
         _logBox.ReadOnly = true;
-        root.Controls.Add(_logBox, 0, 4);
+        root.Controls.Add(_logBox, 0, 3);
+    }
+
+    private TabPage CreatePlatformTab(string title, TextBox urlBox, DataGridView grid, string placeholder)
+    {
+        var page = new TabPage(title);
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(4)
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(layout);
+
+        var channelBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1 };
+        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 14));
+        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
+        channelBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        layout.Controls.Add(channelBar, 0, 0);
+
+        urlBox.Dock = DockStyle.Fill;
+        urlBox.PlaceholderText = placeholder;
+        channelBar.Controls.Add(urlBox, 0, 0);
+
+        var addButton = new Button { Text = "\uCD94\uAC00", Dock = DockStyle.Fill };
+        addButton.Click += (_, _) => AddChannel();
+        channelBar.Controls.Add(addButton, 2, 0);
+
+        var removeButton = new Button { Text = "\uC0AD\uC81C", Dock = DockStyle.Fill };
+        removeButton.Click += (_, _) => RemoveSelected();
+        channelBar.Controls.Add(removeButton, 4, 0);
+
+        SetupGrid(grid);
+        layout.Controls.Add(grid, 0, 1);
+        return page;
+    }
+
+    private TabPage CreateVodTab()
+    {
+        var page = new TabPage("ci.me VOD");
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(4)
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(layout);
+
+        var vodBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1 };
+        vodBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        vodBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 14));
+        vodBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        layout.Controls.Add(vodBar, 0, 0);
+
+        _vodUrlBox.Dock = DockStyle.Fill;
+        _vodUrlBox.PlaceholderText = "https://ci.me/@name/vods/12345";
+        vodBar.Controls.Add(_vodUrlBox, 0, 0);
+
+        _vodDownloadButton.Text = "\uB2E4\uC6B4\uB85C\uB4DC";
+        _vodDownloadButton.Dock = DockStyle.Fill;
+        _vodDownloadButton.Click += async (_, _) => await DownloadVodAsync();
+        vodBar.Controls.Add(_vodDownloadButton, 2, 0);
+
+        SetupVodGrid();
+        layout.Controls.Add(_vodGrid, 0, 1);
+        return page;
+    }
+
+    private void SetupVodGrid()
+    {
+        _vodGrid.Dock = DockStyle.Fill;
+        _vodGrid.AllowUserToAddRows = false;
+        _vodGrid.AllowUserToDeleteRows = false;
+        _vodGrid.AllowUserToResizeRows = false;
+        _vodGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _vodGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _vodGrid.MultiSelect = false;
+        _vodGrid.RowHeadersVisible = false;
+        _vodGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Url", HeaderText = "URL", FillWeight = 210, ReadOnly = true });
+        _vodGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "State", HeaderText = "\uC0C1\uD0DC", FillWeight = 58, ReadOnly = true });
+        _vodGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Progress", HeaderText = "\uC9C4\uD589", FillWeight = 54, ReadOnly = true });
+        _vodGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Size", HeaderText = "\uC6A9\uB7C9", FillWeight = 58, ReadOnly = true });
+        _vodGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "File", HeaderText = "\uD30C\uC77C", FillWeight = 160, ReadOnly = true });
+    }
+
+    private void SetupGrid(DataGridView grid)
+    {
+        grid.Dock = DockStyle.Fill;
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.MultiSelect = false;
+        grid.RowHeadersVisible = false;
+        grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Enabled", HeaderText = "\uC0AC\uC6A9", FillWeight = 38 });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "\uC774\uB984", FillWeight = 74 });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Url", HeaderText = "URL", FillWeight = 190 });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "RecordingState", HeaderText = "\uB179\uD654\uC0C1\uD0DC", FillWeight = 68, ReadOnly = true });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Duration", HeaderText = "\uB179\uD654\uC2DC\uAC04", FillWeight = 64, ReadOnly = true });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Size", HeaderText = "\uC6A9\uB7C9", FillWeight = 58, ReadOnly = true });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FinalizeProgress", HeaderText = "\uBCC0\uD658", FillWeight = 48, ReadOnly = true });
+        grid.CellEndEdit += (_, _) => SaveGridToConfig();
+        grid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (grid.IsCurrentCellDirty) grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+        grid.CellValueChanged += (_, _) => SaveGridToConfig();
     }
 
     private void SetupQualityBox(ComboBox combo)
@@ -233,10 +315,10 @@ public sealed class MainForm : Form
     {
         var wasSuppressing = _suppressConfigSave;
         _suppressConfigSave = true;
-        _grid.Rows.Clear();
+        _cimeGrid.Rows.Clear();
         foreach (var channel in _config.Channels)
         {
-            _grid.Rows.Add(channel.Enabled, channel.EffectiveName, channel.Url, "\uB179\uD654 \uC624\uD504\uB77C\uC778", "00:00:00", "-", "-");
+            _cimeGrid.Rows.Add(channel.Enabled, channel.EffectiveName, channel.Url, "\uB179\uD654 \uC624\uD504\uB77C\uC778", "00:00:00", "-", "-");
         }
         _suppressConfigSave = wasSuppressing;
     }
@@ -245,7 +327,13 @@ public sealed class MainForm : Form
     {
         if (_suppressConfigSave) return;
         var channels = new List<ChannelConfig>();
-        foreach (DataGridViewRow row in _grid.Rows)
+        SaveRowsToChannels(_cimeGrid, channels);
+        _config.Channels = channels;
+    }
+
+    private void SaveRowsToChannels(DataGridView grid, List<ChannelConfig> channels)
+    {
+        foreach (DataGridViewRow row in grid.Rows)
         {
             var url = row.Cells["Url"].Value?.ToString()?.Trim() ?? "";
             if (url.Length == 0) continue;
@@ -257,12 +345,22 @@ public sealed class MainForm : Form
                 Quality = "default"
             });
         }
-        _config.Channels = channels;
+    }
+
+    private IEnumerable<DataGridView> AllGrids()
+    {
+        yield return _cimeGrid;
+    }
+
+    private IEnumerable<DataGridView> AllStyledGrids()
+    {
+        yield return _cimeGrid;
+        yield return _vodGrid;
     }
 
     private void AddChannel()
     {
-        var url = _urlBox.Text.Trim();
+        var url = NormalizeChannelUrl(_cimeUrlBox.Text.Trim());
         if (!Uri.TryCreate(url, UriKind.Absolute, out _))
         {
             MessageBox.Show("\uCC44\uB110 URL\uC744 \uD655\uC778\uD574\uC8FC\uC138\uC694.", "\uC528\uBBF8\uB179\uD654", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -283,17 +381,82 @@ public sealed class MainForm : Form
             Quality = "default",
             Enabled = true
         });
-        _urlBox.Clear();
+        _cimeUrlBox.Clear();
         RefreshGrid();
         SaveConfig();
     }
 
+    private string NormalizeChannelUrl(string value)
+    {
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+            uri.Host.Contains("ci.me", StringComparison.OrdinalIgnoreCase) &&
+            !uri.AbsolutePath.EndsWith("/live", StringComparison.OrdinalIgnoreCase))
+        {
+            return value.TrimEnd('/') + "/live";
+        }
+        return value;
+    }
+
     private void RemoveSelected()
     {
-        if (_grid.SelectedRows.Count == 0) return;
-        _grid.Rows.Remove(_grid.SelectedRows[0]);
+        var grid = _cimeGrid;
+        if (grid.SelectedRows.Count == 0) return;
+        grid.Rows.Remove(grid.SelectedRows[0]);
         SaveGridToConfig();
         SaveConfig();
+    }
+
+    private async Task DownloadVodAsync()
+    {
+        var url = _vodUrlBox.Text.Trim();
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            !uri.Host.Contains("ci.me", StringComparison.OrdinalIgnoreCase) ||
+            !uri.AbsolutePath.Contains("/vods/", StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show("ci.me VOD URL\uC744 \uD655\uC778\uD574\uC8FC\uC138\uC694.", "\uC528\uBBF8\uB179\uD654", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        SaveConfig();
+        _vodDownloadButton.Enabled = false;
+        _vodDownloadCts = new CancellationTokenSource();
+        var rowIndex = _vodGrid.Rows.Add(url, "\uC900\uBE44\uC911", "0%", "-", "-");
+        var row = _vodGrid.Rows[rowIndex];
+        _vodUrlBox.Clear();
+        AppendLog("VOD \uB2E4\uC6B4\uB85C\uB4DC \uC2DC\uC791", false);
+
+        var progress = new Progress<VodDownloadProgress>(item =>
+        {
+            row.Cells["State"].Value = item.State;
+            row.Cells["Progress"].Value = item.Percent.HasValue ? $"{item.Percent.Value}%" : "-";
+            row.Cells["Size"].Value = item.Bytes.HasValue ? FormatBytes(item.Bytes.Value) : "-";
+            row.Cells["File"].Value = string.IsNullOrWhiteSpace(item.OutputPath) ? "-" : Path.GetFileName(item.OutputPath);
+            UpdateFreeSpaceLabel();
+        });
+
+        try
+        {
+            await Task.Run(() => _engine.DownloadCiMeVodAsync(_config, url, progress, _vodDownloadCts.Token));
+            AppendLog("VOD \uB2E4\uC6B4\uB85C\uB4DC \uC644\uB8CC", false);
+        }
+        catch (OperationCanceledException)
+        {
+            row.Cells["State"].Value = "\uCDE8\uC18C";
+            AppendLog("VOD \uB2E4\uC6B4\uB85C\uB4DC \uCDE8\uC18C", false);
+        }
+        catch (Exception ex)
+        {
+            row.Cells["State"].Value = "\uC2E4\uD328";
+            row.Cells["Progress"].Value = "-";
+            AppLogger.Write($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] VOD {url} :: {ex.Message}");
+            AppendLog("VOD \uB2E4\uC6B4\uB85C\uB4DC \uC2E4\uD328", false);
+        }
+        finally
+        {
+            _vodDownloadCts?.Dispose();
+            _vodDownloadCts = null;
+            _vodDownloadButton.Enabled = true;
+        }
     }
 
     private void StartMonitoring()
@@ -323,24 +486,30 @@ public sealed class MainForm : Form
 
     private void MarkRecordingRowsAsFinalizing()
     {
-        foreach (DataGridViewRow row in _grid.Rows)
+        foreach (var grid in AllGrids())
         {
-            if ((row.Cells["RecordingState"].Value?.ToString() ?? "") == "\uB179\uD654\uC911")
+            foreach (DataGridViewRow row in grid.Rows)
             {
-                row.Cells["RecordingState"].Value = "\uB9C8\uBB34\uB9AC\uC911";
+                if ((row.Cells["RecordingState"].Value?.ToString() ?? "") == "\uB179\uD654\uC911")
+                {
+                    row.Cells["RecordingState"].Value = "\uB9C8\uBB34\uB9AC\uC911";
+                }
             }
         }
     }
 
     private void ResetGridStates()
     {
-        foreach (DataGridViewRow row in _grid.Rows)
+        foreach (var grid in AllGrids())
         {
-            var enabled = row.Cells["Enabled"].Value as bool? ?? Convert.ToBoolean(row.Cells["Enabled"].Value ?? true);
-            row.Cells["RecordingState"].Value = enabled ? "\uB179\uD654 \uC624\uD504\uB77C\uC778" : "\uAEBC\uC9D0";
-            row.Cells["Duration"].Value = "00:00:00";
-            row.Cells["Size"].Value = "-";
-            row.Cells["FinalizeProgress"].Value = "-";
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                var enabled = row.Cells["Enabled"].Value as bool? ?? Convert.ToBoolean(row.Cells["Enabled"].Value ?? true);
+                row.Cells["RecordingState"].Value = enabled ? "\uB179\uD654 \uC624\uD504\uB77C\uC778" : "\uAEBC\uC9D0";
+                row.Cells["Duration"].Value = "00:00:00";
+                row.Cells["Size"].Value = "-";
+                row.Cells["FinalizeProgress"].Value = "-";
+            }
         }
     }
 
@@ -361,7 +530,7 @@ public sealed class MainForm : Form
     {
         BeginInvoke(() =>
         {
-            foreach (DataGridViewRow row in _grid.Rows)
+            foreach (DataGridViewRow row in _cimeGrid.Rows)
             {
                 if (!string.Equals(row.Cells["Url"].Value?.ToString(), e.Channel.Url, StringComparison.OrdinalIgnoreCase)) continue;
                 row.Cells["RecordingState"].Value = RecordingStateText(e.State);
@@ -417,14 +586,17 @@ public sealed class MainForm : Form
 
     private void UpdateRecordingDurations()
     {
-        foreach (DataGridViewRow row in _grid.Rows)
+        foreach (var grid in AllGrids())
         {
-            var url = row.Cells["Url"].Value?.ToString();
-            if (string.IsNullOrWhiteSpace(url) || !_recordingStarts.TryGetValue(url, out var startedAt)) continue;
-            row.Cells["Duration"].Value = FormatDuration(DateTime.Now - startedAt);
-            if (_recordingPaths.TryGetValue(url, out var path))
+            foreach (DataGridViewRow row in grid.Rows)
             {
-                row.Cells["Size"].Value = FormatFileSize(path);
+                var url = row.Cells["Url"].Value?.ToString();
+                if (string.IsNullOrWhiteSpace(url) || !_recordingStarts.TryGetValue(url, out var startedAt)) continue;
+                row.Cells["Duration"].Value = FormatDuration(DateTime.Now - startedAt);
+                if (_recordingPaths.TryGetValue(url, out var path))
+                {
+                    row.Cells["Size"].Value = FormatFileSize(path);
+                }
             }
         }
         UpdateFreeSpaceLabel();
@@ -498,15 +670,18 @@ public sealed class MainForm : Form
         var fore = dark ? Color.FromArgb(240, 240, 240) : SystemColors.ControlText;
         ApplyThemeToControl(this, back, panel, fore);
 
-        _grid.BackgroundColor = panel;
-        _grid.GridColor = dark ? Color.FromArgb(70, 70, 74) : SystemColors.ControlDark;
-        _grid.EnableHeadersVisualStyles = false;
-        _grid.ColumnHeadersDefaultCellStyle.BackColor = dark ? Color.FromArgb(48, 48, 52) : SystemColors.Control;
-        _grid.ColumnHeadersDefaultCellStyle.ForeColor = fore;
-        _grid.DefaultCellStyle.BackColor = panel;
-        _grid.DefaultCellStyle.ForeColor = fore;
-        _grid.DefaultCellStyle.SelectionBackColor = dark ? Color.FromArgb(68, 88, 120) : SystemColors.Highlight;
-        _grid.DefaultCellStyle.SelectionForeColor = Color.White;
+        foreach (var grid in AllStyledGrids())
+        {
+            grid.BackgroundColor = panel;
+            grid.GridColor = dark ? Color.FromArgb(70, 70, 74) : SystemColors.ControlDark;
+            grid.EnableHeadersVisualStyles = false;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = dark ? Color.FromArgb(48, 48, 52) : SystemColors.Control;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = fore;
+            grid.DefaultCellStyle.BackColor = panel;
+            grid.DefaultCellStyle.ForeColor = fore;
+            grid.DefaultCellStyle.SelectionBackColor = dark ? Color.FromArgb(68, 88, 120) : SystemColors.Highlight;
+            grid.DefaultCellStyle.SelectionForeColor = Color.White;
+        }
     }
 
     private void ApplyThemeToControl(Control control, Color back, Color panel, Color fore)
@@ -520,7 +695,7 @@ public sealed class MainForm : Form
         }
         else
         {
-            control.BackColor = control is TextBox or DataGridView or ComboBox ? panel : back;
+            control.BackColor = control is TextBox or DataGridView or ComboBox or TabPage ? panel : back;
             control.ForeColor = fore;
         }
 
@@ -533,6 +708,7 @@ public sealed class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         SaveConfig();
+        _vodDownloadCts?.Cancel();
         _engine.StopAsync().GetAwaiter().GetResult();
         _durationTimer.Stop();
         base.OnFormClosing(e);

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -66,6 +66,110 @@ public sealed class RecorderEngine
         }
     }
 
+    public async Task DownloadCiMeVodAsync(AppConfig config, string vodUrl, IProgress<VodDownloadProgress> progress, CancellationToken token)
+    {
+        var channel = new ChannelConfig
+        {
+            Url = vodUrl,
+            Name = ChannelName.FromUrl(vodUrl),
+            Quality = "default",
+            Enabled = true
+        };
+
+        progress.Report(new VodDownloadProgress { Url = vodUrl, State = "\uC900\uBE44\uC911", Percent = 0 });
+        var page = await GetStringAsync(vodUrl, config, channel, token);
+        var streamUrl = FindM3u8Url(page);
+        if (string.IsNullOrWhiteSpace(streamUrl))
+        {
+            throw new InvalidOperationException("VOD \uC2A4\uD2B8\uB9BC \uC8FC\uC18C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+        }
+
+        var title = ExtractBroadcastTitle(page, channel);
+        var chosenUrl = await SelectQualityAsync(streamUrl, config, channel, token);
+        var totalSeconds = await GetPlaylistDurationSecondsAsync(chosenUrl, config, channel, token);
+
+        var outputRoot = config.OutputDirectory;
+        if (!Path.IsPathRooted(outputRoot)) outputRoot = Path.Combine(_root, outputRoot);
+        Directory.CreateDirectory(outputRoot);
+
+        var baseName = $"{DateTime.Now:yyMMdd}_{ChannelName.SafeFileName(title)}";
+        var outputPath = UniquePath(Path.Combine(outputRoot, baseName + ".mp4"));
+        var tempPath = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(outputPath) + ".part.mp4");
+
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-y",
+            "-headers", $"User-Agent: {config.UserAgent}\r\nReferer: {GetReferer(config, channel)}\r\n",
+            "-i", chosenUrl,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            "-nostats",
+            tempPath
+        };
+
+        progress.Report(new VodDownloadProgress { Url = vodUrl, State = "\uB2E4\uC6B4\uB85C\uB4DC\uC911", OutputPath = tempPath, Percent = 0, Bytes = FileSizeOrNull(tempPath) });
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = config.FfmpegPath,
+            Arguments = JoinArgs(args),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        });
+        if (process == null) throw new InvalidOperationException("ffmpeg\uB97C \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+
+        try
+        {
+            process.ErrorDataReceived += (_, _) => { };
+            process.BeginErrorReadLine();
+            var lastProgressReport = DateTime.MinValue;
+            var lastPercent = -1;
+            while (await process.StandardOutput.ReadLineAsync(token) is { } line)
+            {
+                token.ThrowIfCancellationRequested();
+                var percent = totalSeconds > 0 ? ParseProgressPercent(line, totalSeconds) : null;
+                var now = DateTime.Now;
+                var shouldReport = percent.HasValue
+                    ? percent.Value != lastPercent || now - lastProgressReport >= TimeSpan.FromSeconds(1)
+                    : now - lastProgressReport >= TimeSpan.FromSeconds(1);
+                if (shouldReport)
+                {
+                    lastProgressReport = now;
+                    lastPercent = percent ?? lastPercent;
+                    progress.Report(new VodDownloadProgress
+                    {
+                        Url = vodUrl,
+                        State = "\uB2E4\uC6B4\uB85C\uB4DC\uC911",
+                        OutputPath = tempPath,
+                        Percent = percent,
+                        Bytes = FileSizeOrNull(tempPath)
+                    });
+                }
+            }
+
+            await process.WaitForExitAsync(token);
+        }
+        catch
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(CancellationToken.None);
+            }
+            throw;
+        }
+        if (process.ExitCode != 0 || !File.Exists(tempPath))
+        {
+            throw new InvalidOperationException("VOD \uB2E4\uC6B4\uB85C\uB4DC\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. part \uD30C\uC77C\uC740 \uB0A8\uACA8\uB450\uC5C8\uC2B5\uB2C8\uB2E4.");
+        }
+
+        if (File.Exists(outputPath)) outputPath = UniquePath(outputPath);
+        File.Move(tempPath, outputPath);
+        progress.Report(new VodDownloadProgress { Url = vodUrl, State = "\uC644\uB8CC", OutputPath = outputPath, Percent = 100, Bytes = FileSizeOrNull(outputPath) });
+    }
     private async Task WatchAsync(AppConfig config, CancellationToken token)
     {
         Log("monitor started");
@@ -122,23 +226,21 @@ public sealed class RecorderEngine
         try
         {
             SetStatus(channel, ChannelState.Checking, "checking");
-            var page = await GetStringAsync(channel.Url, config, token);
-            var streamUrl = FindM3u8Url(page);
-            if (string.IsNullOrWhiteSpace(streamUrl))
+            var stream = await ResolveStreamAsync(config, channel, token);
+            if (stream == null)
             {
                 SetStatus(channel, ChannelState.Offline, "offline", false, null);
                 return;
             }
 
-            if (!await IsLivePlaylistAsync(streamUrl, config, token))
+            if (!await IsLivePlaylistAsync(stream.StreamUrl, config, channel, token))
             {
                 SetStatus(channel, ChannelState.Offline, "offline", false, null);
                 return;
             }
 
-            var title = ExtractBroadcastTitle(page, channel);
-            var chosenUrl = await SelectQualityAsync(streamUrl, config, channel, token);
-            var session = StartRecording(config, channel, chosenUrl, title);
+            var chosenUrl = await SelectQualityAsync(stream.StreamUrl, config, channel, token);
+            var session = StartRecording(config, channel, chosenUrl, stream.Title);
             await Task.Delay(TimeSpan.FromSeconds(2), token);
             if (session.Process.HasExited)
             {
@@ -160,12 +262,26 @@ public sealed class RecorderEngine
         }
     }
 
-    private async Task<string> GetStringAsync(string url, AppConfig config, CancellationToken token)
+    private async Task<StreamInfo?> ResolveStreamAsync(AppConfig config, ChannelConfig channel, CancellationToken token)
+    {
+        return await ResolveCiMeStreamAsync(config, channel, token);
+    }
+
+    private async Task<StreamInfo?> ResolveCiMeStreamAsync(AppConfig config, ChannelConfig channel, CancellationToken token)
+    {
+        var page = await GetStringAsync(channel.Url, config, channel, token);
+        var streamUrl = FindM3u8Url(page);
+        return string.IsNullOrWhiteSpace(streamUrl)
+            ? null
+            : new StreamInfo(streamUrl, ExtractBroadcastTitle(page, channel));
+    }
+
+    private async Task<string> GetStringAsync(string url, AppConfig config, ChannelConfig channel, CancellationToken token)
     {
         using var client = new HttpClient();
         client.Timeout = TimeSpan.FromSeconds(20);
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", config.UserAgent);
-        client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", config.Referer);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", GetReferer(config, channel));
         using var response = await client.GetAsync(url, token);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync(token);
@@ -178,11 +294,11 @@ public sealed class RecorderEngine
             text.Contains("watching", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<bool> IsLivePlaylistAsync(string streamUrl, AppConfig config, CancellationToken token)
+    private async Task<bool> IsLivePlaylistAsync(string streamUrl, AppConfig config, ChannelConfig channel, CancellationToken token)
     {
         try
         {
-            var playlist = await GetStringAsync(streamUrl, config, token);
+            var playlist = await GetStringAsync(streamUrl, config, channel, token);
             if (!playlist.Contains("#EXTM3U", StringComparison.OrdinalIgnoreCase)) return false;
             if (playlist.Contains("#EXT-X-ENDLIST", StringComparison.OrdinalIgnoreCase)) return false;
             return playlist.Contains("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase) ||
@@ -242,7 +358,7 @@ public sealed class RecorderEngine
         string playlist;
         try
         {
-            playlist = await GetStringAsync(masterUrl, config, token);
+            playlist = await GetStringAsync(masterUrl, config, channel, token);
         }
         catch
         {
@@ -263,6 +379,27 @@ public sealed class RecorderEngine
         }
 
         return masterUrl;
+    }
+
+    private async Task<double> GetPlaylistDurationSecondsAsync(string playlistUrl, AppConfig config, ChannelConfig channel, CancellationToken token)
+    {
+        try
+        {
+            var playlist = await GetStringAsync(playlistUrl, config, channel, token);
+            var seconds = 0d;
+            foreach (Match match in Regex.Matches(playlist, "#EXTINF:([0-9.]+)", RegexOptions.IgnoreCase))
+            {
+                if (double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value))
+                {
+                    seconds += value;
+                }
+            }
+            return seconds;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private List<VariantInfo> ParseVariants(string masterUrl, string playlist)
@@ -295,6 +432,11 @@ public sealed class RecorderEngine
         return new Uri(new Uri(baseUrl), url).ToString();
     }
 
+    private string GetReferer(AppConfig config, ChannelConfig channel)
+    {
+        return config.Referer;
+    }
+
     private RecordingSession StartRecording(AppConfig config, ChannelConfig channel, string streamUrl, string title)
     {
         var outputRoot = config.OutputDirectory;
@@ -312,7 +454,7 @@ public sealed class RecorderEngine
             "-reconnect_streamed", "1",
             "-reconnect_at_eof", "1",
             "-reconnect_delay_max", "30",
-            "-headers", $"User-Agent: {config.UserAgent}\r\nReferer: {config.Referer}\r\n",
+            "-headers", $"User-Agent: {config.UserAgent}\r\nReferer: {GetReferer(config, channel)}\r\n",
             "-i", streamUrl,
             "-c", "copy",
             "-f", "mpegts",
@@ -340,6 +482,18 @@ public sealed class RecorderEngine
         var name = Path.GetFileNameWithoutExtension(path);
         var extension = Path.GetExtension(path);
         return Path.Combine(directory, $"{name}_{DateTime.Now:HHmmss}{extension}");
+    }
+
+    private long? FileSizeOrNull(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void FinalizeRecording(RecordingSession session)
@@ -478,6 +632,8 @@ public sealed class RecorderEngine
 
 internal sealed record RecordingSession(ChannelConfig Channel, Process Process, string TempPath, string OutputPath, string FfmpegPath, DateTime StartedAt);
 
+internal sealed record StreamInfo(string StreamUrl, string Title);
+
 public static class ConfigStore
 {
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
@@ -494,3 +650,4 @@ public static class ConfigStore
         File.WriteAllText(path, JsonSerializer.Serialize(config, Options));
     }
 }
+

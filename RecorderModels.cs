@@ -53,6 +53,16 @@ public enum ChannelState
     Disabled
 }
 
+public sealed class VodDownloadProgress
+{
+    public string Url { get; set; } = "";
+    public string State { get; set; } = "";
+    public string OutputPath { get; set; } = "";
+    public int? Percent { get; set; }
+    public long? Bytes { get; set; }
+    public string Message { get; set; } = "";
+}
+
 public static class ChannelName
 {
     public static string FromUrl(string url)

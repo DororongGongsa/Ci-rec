@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>cime-recorder.ico</ApplicationIcon>
+    <AssemblyName>씨미녹화-버전</AssemblyName>
+    <Product>씨미녹화-버전</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="cime-recorder.ico" />
+    <EmbeddedResource Include="C:\ffmpeg\bin\ffmpeg.exe">
+      <LogicalName>ffmpeg.exe</LogicalName>
+    </EmbeddedResource>
+    <None Update="recorder-config.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
